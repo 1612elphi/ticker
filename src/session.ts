@@ -22,6 +22,8 @@ const BOX = {
   LT: 0xcc,  // ╠
   RT: 0xb9,  // ╣
   sH:  0xc4, // ─
+  sLT: 0xc7, // ╟ (double vert + single horiz left junction)
+  sRT: 0xb6, // ╢ (double vert + single horiz right junction)
 } as const;
 
 function topBorder(): Buffer {
@@ -37,7 +39,7 @@ function sectionDivider(): Buffer {
 }
 
 function thinDivider(): Buffer {
-  return Buffer.from([BOX.V, ...Array(IW).fill(BOX.sH), BOX.V, 0x0a]);
+  return Buffer.from([BOX.sLT, ...Array(IW).fill(BOX.sH), BOX.sRT, 0x0a]);
 }
 
 function boxLine(content: string, centered = false): Buffer {
@@ -53,7 +55,7 @@ function boxLine(content: string, centered = false): Buffer {
   inner = inner.slice(0, IW);
   const buf = Buffer.alloc(inner.length + 3);
   buf[0] = BOX.V;
-  buf.write(inner, 1, 'ascii');
+  buf.write(inner, 1, 'latin1');
   buf[inner.length + 1] = BOX.V;
   buf[inner.length + 2] = 0x0a;
   return buf;
