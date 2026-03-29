@@ -4,6 +4,7 @@ import {
   init, align, Align, bold, doubleSize, text, newline,
   rasterImage, cut,
 } from './escpos.ts';
+import { packRaster } from './raster.ts';
 import { getLogoBuffer } from './logo.ts';
 import sharp from 'sharp';
 
@@ -120,34 +121,26 @@ export interface SessionData {
   project?: string;
 }
 
+let cachedLogo: Buffer[] | null = null;
+
 async function renderLogo(): Promise<Buffer[]> {
+  if (cachedLogo) return cachedLogo;
+
   const logoPng = getLogoBuffer();
-  // The embedded logo is already 1-bit: black sparkle on white bg
-  // Just need to convert to raw grayscale for our raster packer
   const { data: pixels, info } = await sharp(logoPng)
     .flatten({ background: { r: 255, g: 255, b: 255 } })
     .grayscale()
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  const widthBytes = Math.ceil(info.width / 8);
-  const rasterData = Buffer.alloc(widthBytes * info.height);
+  const { rasterData, widthBytes } = packRaster(pixels, info.width, info.height);
 
-  for (let y = 0; y < info.height; y++) {
-    for (let x = 0; x < info.width; x++) {
-      const pixel = pixels[y * info.width + x];
-      // pixel < 128 = dark = print dot
-      if (pixel < 128) {
-        rasterData[y * widthBytes + Math.floor(x / 8)] |= (1 << (7 - (x % 8)));
-      }
-    }
-  }
-
-  return [
+  cachedLogo = [
     newline(),
     rasterImage(rasterData, widthBytes, info.height),
     newline(),
   ];
+  return cachedLogo;
 }
 
 export async function buildSessionReceipt(data: SessionData): Promise<Buffer> {

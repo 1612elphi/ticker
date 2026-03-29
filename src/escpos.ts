@@ -28,7 +28,7 @@ export function doubleSize(on: boolean): Buffer {
 }
 
 export function text(str: string): Buffer {
-  return Buffer.from(str, 'ascii');
+  return Buffer.from(str, 'latin1');
 }
 
 export function newline(count = 1): Buffer {

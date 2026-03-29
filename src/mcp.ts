@@ -1,10 +1,10 @@
-// MCP server — Streamable HTTP transport (web standard), three tools mirroring the REST API
+// MCP server — Streamable HTTP transport (web standard)
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
 import { buildReceipt } from './escpos.ts';
-import { buildImagePrint, fetchImage } from './raster.ts';
+import { buildImagePrint, resolveImage } from './raster.ts';
 import { buildSessionReceipt } from './session.ts';
 import { print } from './printer.ts';
 import type { Context } from 'hono';
@@ -55,21 +55,8 @@ function createServer(): McpServer {
       cut: z.boolean().optional().describe('Cut paper after printing (default true)'),
     },
     async (params) => {
-      let imageBuffer: Buffer;
-
-      if (params.url) {
-        imageBuffer = await fetchImage(params.url);
-      } else if (params.base64) {
-        imageBuffer = Buffer.from(params.base64, 'base64');
-      } else {
-        return { content: [{ type: 'text', text: 'Error: url or base64 is required' }], isError: true };
-      }
-
-      const data = await buildImagePrint(imageBuffer, {
-        caption: params.caption,
-        cut: params.cut,
-      });
-
+      const imageBuffer = await resolveImage(params);
+      const data = await buildImagePrint(imageBuffer, { caption: params.caption, cut: params.cut });
       await print(data);
       return { content: [{ type: 'text', text: `Printed image (${data.length} bytes)` }] };
     }
@@ -120,23 +107,39 @@ function createServer(): McpServer {
   return server;
 }
 
-// Stateful: one transport per session, server per session
-const sessions = new Map<string, { server: McpServer; transport: WebStandardStreamableHTTPServerTransport }>();
+// Session management with TTL eviction
+interface Session {
+  server: McpServer;
+  transport: WebStandardStreamableHTTPServerTransport;
+  lastSeen: number;
+}
+
+const sessions = new Map<string, Session>();
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.lastSeen > SESSION_TTL_MS) {
+      session.transport.close();
+      sessions.delete(id);
+    }
+  }
+}, 5 * 60 * 1000); // sweep every 5 minutes
 
 export async function handleMcp(c: Context): Promise<Response> {
   const sessionId = c.req.header('mcp-session-id');
 
-  // Existing session
   if (sessionId && sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
+    session.lastSeen = Date.now();
     return session.transport.handleRequest(c.req.raw);
   }
 
-  // New session (initialization)
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
     onsessioninitialized: (id) => {
-      sessions.set(id, { server, transport });
+      sessions.set(id, { server, transport, lastSeen: Date.now() });
     },
   });
 
