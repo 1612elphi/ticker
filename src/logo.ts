@@ -1,38 +1,9 @@
-// Claude logo as a 1-bit bitmap for receipt printing
-// Simple stylized "C" sparkle mark, 80x80px, hand-drawn in code
+// Claude sparkle logo — embedded as base64 PNG
+// Source: claude.ai/apple-touch-icon.png, processed to black sparkle on white background
+// 272x271 grayscale PNG
 
-import sharp from 'sharp';
+const LOGO_BASE64 = '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';
 
-// Generate the Claude logo as a PNG buffer
-export async function generateLogo(): Promise<Buffer> {
-  // Create the Anthropic sparkle/asterisk mark as SVG
-  // Based on the Claude logo — a rounded asterisk/sparkle shape
-  const svg = `<svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
-    <rect width="120" height="120" fill="white"/>
-    <g transform="translate(60,60)">
-      <!-- Claude sparkle/asterisk shape -->
-      <path d="
-        M 0,-45
-        C 5,-20 10,-15 15,-10
-        C 20,-5 40,-5 45,0
-        C 40,5 20,5 15,10
-        C 10,15 5,20 0,45
-        C -5,20 -10,15 -15,10
-        C -20,5 -40,5 -45,0
-        C -40,-5 -20,-5 -15,-10
-        C -10,-15 -5,-20 0,-45
-        Z
-      " fill="black"/>
-    </g>
-  </svg>`;
-
-  return Buffer.from(svg);
-}
-
-export async function getLogoPng(): Promise<Buffer> {
-  const svg = await generateLogo();
-  return sharp(svg)
-    .resize(160, 160, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
-    .png()
-    .toBuffer();
+export function getLogoBuffer(): Buffer {
+  return Buffer.from(LOGO_BASE64, 'base64');
 }

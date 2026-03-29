@@ -1,22 +1,99 @@
-// Claude Code session receipt builder
+// Claude Code session receipt builder with box drawing layout
 
 import {
-  init, align, Align, bold, doubleSize, text, newline, separator, cut,
-  rasterImage,
+  init, align, Align, bold, doubleSize, text, newline,
+  rasterImage, cut,
 } from './escpos.ts';
-import { buildImagePrint, fetchImage } from './raster.ts';
-import { getLogoPng } from './logo.ts';
+import { getLogoBuffer } from './logo.ts';
 import sharp from 'sharp';
 
-const W = 48; // receipt character width
+const W = 48; // receipt character width (inner width = W - 2 for box borders)
+const IW = W - 2; // inner width between box walls
+
+// PC437 box drawing bytes
+const BOX = {
+  TL: 0xc9,  // ╔
+  TR: 0xbb,  // ╗
+  BL: 0xc8,  // ╚
+  BR: 0xbc,  // ╝
+  H:  0xcd,  // ═
+  V:  0xba,  // ║
+  LT: 0xcc,  // ╠
+  RT: 0xb9,  // ╣
+  sH:  0xc4, // ─
+} as const;
+
+function topBorder(): Buffer {
+  return Buffer.from([BOX.TL, ...Array(IW).fill(BOX.H), BOX.TR, 0x0a]);
+}
+
+function bottomBorder(): Buffer {
+  return Buffer.from([BOX.BL, ...Array(IW).fill(BOX.H), BOX.BR, 0x0a]);
+}
+
+function sectionDivider(): Buffer {
+  return Buffer.from([BOX.LT, ...Array(IW).fill(BOX.H), BOX.RT, 0x0a]);
+}
+
+function thinDivider(): Buffer {
+  return Buffer.from([BOX.V, ...Array(IW).fill(BOX.sH), BOX.V, 0x0a]);
+}
+
+function boxLine(content: string, centered = false): Buffer {
+  let inner: string;
+  if (centered) {
+    const pad = Math.max(0, IW - content.length);
+    const left = Math.floor(pad / 2);
+    const right = pad - left;
+    inner = ' '.repeat(left) + content + ' '.repeat(right);
+  } else {
+    inner = content + ' '.repeat(Math.max(0, IW - content.length));
+  }
+  inner = inner.slice(0, IW);
+  const buf = Buffer.alloc(inner.length + 3);
+  buf[0] = BOX.V;
+  buf.write(inner, 1, 'ascii');
+  buf[inner.length + 1] = BOX.V;
+  buf[inner.length + 2] = 0x0a;
+  return buf;
+}
+
+function boxEmpty(): Buffer {
+  return boxLine('');
+}
+
+function boxKeyValue(label: string, value: string): Buffer {
+  const gap = Math.max(1, IW - 1 - label.length - value.length);
+  return boxLine(' ' + label + ' '.repeat(gap - 1) + value);
+}
+
+function formatNumber(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
+function wordWrap(s: string, width: number): string[] {
+  const words = s.split(' ');
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    if (current.length + word.length + 1 > width) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = current ? current + ' ' + word : word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
 
 export interface FileChange {
-  status: 'A' | 'M' | 'D' | 'R'; // added, modified, deleted, renamed
+  status: 'A' | 'M' | 'D' | 'R';
   path: string;
 }
 
 export interface ReviewResult {
-  score: number; // 0-10
+  score: number;
   testsTotal?: number;
   testsPassing?: number;
   typeErrors?: boolean;
@@ -43,208 +120,203 @@ export interface SessionData {
   project?: string;
 }
 
-function center(s: string, width = W): string {
-  const pad = Math.max(0, Math.floor((width - s.length) / 2));
-  return ' '.repeat(pad) + s;
-}
+async function renderLogo(): Promise<Buffer[]> {
+  const logoPng = getLogoBuffer();
+  // The embedded logo is already 1-bit: black sparkle on white bg
+  // Just need to convert to raw grayscale for our raster packer
+  const { data: pixels, info } = await sharp(logoPng)
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
-function rightAlign(label: string, value: string, width = W): string {
-  const gap = Math.max(1, width - label.length - value.length);
-  return label + ' '.repeat(gap) + value;
-}
+  const widthBytes = Math.ceil(info.width / 8);
+  const rasterData = Buffer.alloc(widthBytes * info.height);
 
-function formatNumber(n: number): string {
-  return n.toLocaleString('en-US');
-}
-
-function sectionHeader(title: string): Buffer[] {
-  return [
-    newline(),
-    bold(true),
-    text(center(title)), newline(),
-    bold(false),
-    text(center('-'.repeat(Math.min(title.length + 4, W)))), newline(),
-  ];
-}
-
-function wordWrap(s: string, width = W - 4): string[] {
-  const words = s.split(' ');
-  const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    if (current.length + word.length + 1 > width) {
-      lines.push(current);
-      current = word;
-    } else {
-      current = current ? current + ' ' + word : word;
+  for (let y = 0; y < info.height; y++) {
+    for (let x = 0; x < info.width; x++) {
+      const pixel = pixels[y * info.width + x];
+      // pixel < 128 = dark = print dot
+      if (pixel < 128) {
+        rasterData[y * widthBytes + Math.floor(x / 8)] |= (1 << (7 - (x % 8)));
+      }
     }
   }
-  if (current) lines.push(current);
-  return lines;
+
+  return [
+    newline(),
+    rasterImage(rasterData, widthBytes, info.height),
+    newline(),
+  ];
 }
 
 export async function buildSessionReceipt(data: SessionData): Promise<Buffer> {
   const parts: Buffer[] = [init()];
 
-  // Logo
+  parts.push(align(Align.CENTER));
+
+  // --- Logo ---
   try {
-    const logoPng = await getLogoPng();
-    const resized = sharp(logoPng)
-      .resize(200, 200, { fit: 'inside' })
-      .grayscale()
-      .threshold(128);
-
-    const { data: pixels, info } = await resized.raw().toBuffer({ resolveWithObject: true });
-    const widthBytes = Math.ceil(info.width / 8);
-    const rasterData = Buffer.alloc(widthBytes * info.height);
-
-    for (let y = 0; y < info.height; y++) {
-      for (let x = 0; x < info.width; x++) {
-        if (pixels[y * info.width + x] === 0) {
-          rasterData[y * widthBytes + Math.floor(x / 8)] |= (1 << (7 - (x % 8)));
-        }
-      }
-    }
-
-    parts.push(align(Align.CENTER), newline());
-    parts.push(rasterImage(rasterData, widthBytes, info.height));
+    parts.push(...await renderLogo());
   } catch {
-    // Skip logo on error
+    parts.push(newline(2));
   }
 
-  // Title
-  parts.push(align(Align.CENTER), newline());
+  // --- Title (outside box, big text) ---
   parts.push(bold(true), doubleSize(true));
   parts.push(text('CLAUDE CODE'), newline());
   parts.push(doubleSize(false));
   parts.push(text('SESSION RECEIPT'), newline());
   parts.push(bold(false));
-  parts.push(text('='.repeat(W)), newline());
+  parts.push(newline());
 
-  // Session info
+  // --- Switch to left align for the box ---
+  parts.push(align(Align.LEFT));
+
+  // === TOP BORDER ===
+  parts.push(topBorder());
+
+  // --- Project name ---
   if (data.project) {
-    parts.push(newline());
-    parts.push(bold(true), text(center(data.project)), newline(), bold(false));
+    parts.push(boxEmpty());
+    parts.push(bold(true));
+    parts.push(boxLine(data.project, true));
+    parts.push(bold(false));
+    parts.push(boxEmpty());
   }
 
-  if (data.date || data.startTime) {
-    parts.push(newline());
-    if (data.date) {
-      parts.push(text(center(data.date)), newline());
-    }
+  // --- Session info ---
+  if (data.date || data.startTime || data.model) {
+    if (data.project) parts.push(thinDivider());
+    parts.push(boxEmpty());
+    if (data.date) parts.push(boxLine(data.date, true));
     if (data.startTime && data.endTime) {
-      parts.push(text(center(`${data.startTime} - ${data.endTime}`)), newline());
+      parts.push(boxLine(`${data.startTime} ~ ${data.endTime}`, true));
     }
-    if (data.duration) {
-      parts.push(text(center(`Duration: ${data.duration}`)), newline());
-    }
+    if (data.duration) parts.push(boxLine(`Duration: ${data.duration}`, true));
+    if (data.model) parts.push(boxLine(data.model, true));
+    parts.push(boxEmpty());
   }
 
-  if (data.model) {
-    parts.push(text(center(data.model)), newline());
-  }
+  // --- CONVERSATION section ---
+  parts.push(sectionDivider());
+  parts.push(bold(true));
+  parts.push(boxLine('CONVERSATION', true));
+  parts.push(bold(false));
+  parts.push(thinDivider());
+  if (data.messages != null) parts.push(boxKeyValue('Messages', formatNumber(data.messages)));
+  if (data.humanTurns != null) parts.push(boxKeyValue('Human turns', formatNumber(data.humanTurns)));
+  if (data.toolCalls != null) parts.push(boxKeyValue('Tool calls', formatNumber(data.toolCalls)));
+  parts.push(boxEmpty());
 
-  // Conversation stats
-  parts.push(...sectionHeader('CONVERSATION'));
-  parts.push(align(Align.LEFT));
-  if (data.messages != null) {
-    parts.push(text('  ' + rightAlign('Messages', formatNumber(data.messages), W - 4)), newline());
-  }
-  if (data.humanTurns != null) {
-    parts.push(text('  ' + rightAlign('Human turns', formatNumber(data.humanTurns), W - 4)), newline());
-  }
-  if (data.toolCalls != null) {
-    parts.push(text('  ' + rightAlign('Tool calls', formatNumber(data.toolCalls), W - 4)), newline());
-  }
-
-  // Tokens
-  parts.push(align(Align.CENTER));
-  parts.push(...sectionHeader('TOKENS'));
-  parts.push(align(Align.LEFT));
-  if (data.tokensIn != null) {
-    parts.push(text('  ' + rightAlign('Input', formatNumber(data.tokensIn), W - 4)), newline());
-  }
-  if (data.tokensOut != null) {
-    parts.push(text('  ' + rightAlign('Output', formatNumber(data.tokensOut), W - 4)), newline());
-  }
-  if (data.cacheRead != null) {
-    parts.push(text('  ' + rightAlign('Cache read', formatNumber(data.cacheRead), W - 4)), newline());
-  }
-  if (data.cacheWrite != null) {
-    parts.push(text('  ' + rightAlign('Cache write', formatNumber(data.cacheWrite), W - 4)), newline());
-  }
+  // --- TOKENS section ---
+  parts.push(sectionDivider());
+  parts.push(bold(true));
+  parts.push(boxLine('TOKENS', true));
+  parts.push(bold(false));
+  parts.push(thinDivider());
+  if (data.tokensIn != null) parts.push(boxKeyValue('Input', formatNumber(data.tokensIn)));
+  if (data.tokensOut != null) parts.push(boxKeyValue('Output', formatNumber(data.tokensOut)));
+  if (data.cacheRead != null) parts.push(boxKeyValue('Cache read', formatNumber(data.cacheRead)));
+  if (data.cacheWrite != null) parts.push(boxKeyValue('Cache write', formatNumber(data.cacheWrite)));
   if (data.tokensIn != null && data.tokensOut != null) {
     const total = data.tokensIn + data.tokensOut + (data.cacheRead ?? 0) + (data.cacheWrite ?? 0);
-    parts.push(text('  ' + '-'.repeat(W - 4)), newline());
+    parts.push(thinDivider());
     parts.push(bold(true));
-    parts.push(text('  ' + rightAlign('Total', formatNumber(total), W - 4)), newline());
+    parts.push(boxKeyValue('Total', formatNumber(total)));
     parts.push(bold(false));
   }
+  parts.push(boxEmpty());
 
-  // Cost
-  parts.push(align(Align.CENTER));
-  parts.push(...sectionHeader('COST'));
+  // --- COST section ---
+  parts.push(sectionDivider());
   parts.push(bold(true));
-  parts.push(text(center(data.cost ?? '$0.00')), newline());
+  parts.push(boxLine('COST', true));
   parts.push(bold(false));
+  parts.push(thinDivider());
+  parts.push(bold(true));
+  parts.push(boxLine(data.cost ?? '$0.00', true));
+  parts.push(bold(false));
+  parts.push(boxEmpty());
 
-  // Files
+  // --- FILES section ---
   if (data.files && data.files.length > 0) {
-    parts.push(...sectionHeader(`FILES (${data.files.length})`));
-    parts.push(align(Align.LEFT));
+    parts.push(sectionDivider());
+    parts.push(bold(true));
+    parts.push(boxLine(`FILES (${data.files.length})`, true));
+    parts.push(bold(false));
+    parts.push(thinDivider());
     for (const f of data.files) {
-      const statusChar = f.status;
-      // Truncate long paths
-      const maxPath = W - 6;
+      const maxPath = IW - 5;
       const path = f.path.length > maxPath
         ? '...' + f.path.slice(-(maxPath - 3))
         : f.path;
-      parts.push(text(`  ${statusChar} ${path}`), newline());
+      parts.push(boxLine(` ${f.status} ${path}`));
     }
+    parts.push(boxEmpty());
   }
 
-  // Summary
+  // --- SUMMARY section ---
   if (data.summary) {
-    parts.push(align(Align.CENTER));
-    parts.push(...sectionHeader('SUMMARY'));
-    parts.push(align(Align.LEFT));
-    const lines = wordWrap(data.summary);
+    parts.push(sectionDivider());
+    parts.push(bold(true));
+    parts.push(boxLine('SUMMARY', true));
+    parts.push(bold(false));
+    parts.push(thinDivider());
+    const lines = wordWrap(data.summary, IW - 4);
     for (const line of lines) {
-      parts.push(text('  ' + line), newline());
+      parts.push(boxLine('  ' + line));
     }
+    parts.push(boxEmpty());
   }
 
-  // Code review
+  // --- CODE REVIEW section ---
   if (data.review) {
+    parts.push(sectionDivider());
+    parts.push(bold(true));
+    parts.push(boxLine('CODE REVIEW', true));
+    parts.push(bold(false));
+    parts.push(thinDivider());
+
+    // Score: close the box, print centered double-size, reopen box
+    parts.push(bottomBorder());
     parts.push(align(Align.CENTER));
-    parts.push(...sectionHeader('CODE REVIEW'));
     parts.push(newline());
     parts.push(bold(true), doubleSize(true));
-    parts.push(text(center(`${data.review.score.toFixed(1)}/10`)), newline());
+    parts.push(text(`${data.review.score.toFixed(1)}/10`), newline());
     parts.push(doubleSize(false), bold(false));
     parts.push(newline());
     parts.push(align(Align.LEFT));
+    parts.push(topBorder());
 
     if (data.review.testsTotal != null) {
       const pass = data.review.testsPassing ?? data.review.testsTotal;
       const ok = pass === data.review.testsTotal;
-      parts.push(text(`  ${ok ? '+' : 'x'} Tests: ${pass}/${data.review.testsTotal} passing`), newline());
+      parts.push(boxLine(` ${ok ? '+' : 'x'} Tests: ${pass}/${data.review.testsTotal} passing`));
     }
     if (data.review.typeErrors != null) {
-      parts.push(text(`  ${data.review.typeErrors ? 'x' : '+'} Type errors: ${data.review.typeErrors ? 'yes' : 'none'}`), newline());
+      parts.push(boxLine(` ${data.review.typeErrors ? 'x' : '+'} Type errors: ${data.review.typeErrors ? 'yes' : 'none'}`));
     }
     if (data.review.notes) {
       for (const note of data.review.notes) {
-        parts.push(text(`  ~ ${note}`), newline());
+        const wrapped = wordWrap(note, IW - 6);
+        parts.push(boxLine(` ~ ${wrapped[0]}`));
+        for (let i = 1; i < wrapped.length; i++) {
+          parts.push(boxLine(`   ${wrapped[i]}`));
+        }
       }
     }
+    parts.push(boxEmpty());
   }
 
-  // Footer
-  parts.push(align(Align.CENTER), newline());
-  parts.push(text('='.repeat(W)), newline());
-  parts.push(text(center('printed by ticker')), newline());
-  parts.push(text('='.repeat(W)), newline());
+  // === BOTTOM BORDER ===
+  parts.push(bottomBorder());
+
+  // --- Footer (outside box) ---
+  parts.push(align(Align.CENTER));
+  parts.push(newline());
+  parts.push(text('printed by ticker'), newline());
+  parts.push(newline());
 
   parts.push(cut());
 
