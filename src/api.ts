@@ -3,6 +3,7 @@
 import { Hono } from 'hono';
 import { buildReceipt, type ReceiptData } from './escpos.ts';
 import { buildImagePrint, fetchImage } from './raster.ts';
+import { buildSessionReceipt, type SessionData } from './session.ts';
 import { print } from './printer.ts';
 
 export const api = new Hono();
@@ -54,6 +55,13 @@ api.post('/print/image', async (c) => {
     cut: body.cut,
   });
 
+  await print(data);
+  return c.json({ ok: true, bytes: data.length });
+});
+
+api.post('/print/session', async (c) => {
+  const body = await c.req.json<SessionData>();
+  const data = await buildSessionReceipt(body);
   await print(data);
   return c.json({ ok: true, bytes: data.length });
 });

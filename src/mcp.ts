@@ -5,6 +5,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { z } from 'zod';
 import { buildReceipt } from './escpos.ts';
 import { buildImagePrint, fetchImage } from './raster.ts';
+import { buildSessionReceipt } from './session.ts';
 import { print } from './printer.ts';
 import type { Context } from 'hono';
 
@@ -71,6 +72,48 @@ function createServer(): McpServer {
 
       await print(data);
       return { content: [{ type: 'text', text: `Printed image (${data.length} bytes)` }] };
+    }
+  );
+
+  const fileChangeSchema = z.object({
+    status: z.enum(['A', 'M', 'D', 'R']).describe('A=added, M=modified, D=deleted, R=renamed'),
+    path: z.string().describe('File path relative to project root'),
+  });
+
+  const reviewSchema = z.object({
+    score: z.number().min(0).max(10).describe('Code review score 0-10'),
+    testsTotal: z.number().optional().describe('Total number of tests'),
+    testsPassing: z.number().optional().describe('Number of passing tests'),
+    typeErrors: z.boolean().optional().describe('Whether type errors exist'),
+    notes: z.array(z.string()).optional().describe('Review notes/observations'),
+  });
+
+  server.tool(
+    'print_session',
+    'Print a Claude Code session summary receipt with conversation stats, token usage, files changed, summary, and code review score.',
+    {
+      project: z.string().optional().describe('Project name'),
+      date: z.string().optional().describe('Session date (e.g. 2026-03-29)'),
+      startTime: z.string().optional().describe('Session start time (e.g. 14:32)'),
+      endTime: z.string().optional().describe('Session end time (e.g. 15:47)'),
+      duration: z.string().optional().describe('Session duration (e.g. 1h 15m)'),
+      model: z.string().optional().describe('Model used (e.g. claude-opus-4-6)'),
+      messages: z.number().optional().describe('Total messages in conversation'),
+      humanTurns: z.number().optional().describe('Number of human turns'),
+      toolCalls: z.number().optional().describe('Total tool calls made'),
+      tokensIn: z.number().optional().describe('Input tokens'),
+      tokensOut: z.number().optional().describe('Output tokens'),
+      cacheRead: z.number().optional().describe('Cache read tokens'),
+      cacheWrite: z.number().optional().describe('Cache write tokens'),
+      cost: z.string().optional().describe('Cost string (e.g. "$0.00 (subscription)")'),
+      files: z.array(fileChangeSchema).optional().describe('Files changed'),
+      summary: z.string().optional().describe('Summary of what was accomplished'),
+      review: reviewSchema.optional().describe('Code review results'),
+    },
+    async (params) => {
+      const data = await buildSessionReceipt(params);
+      await print(data);
+      return { content: [{ type: 'text', text: `Printed session receipt (${data.length} bytes)` }] };
     }
   );
 
