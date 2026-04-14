@@ -1,6 +1,6 @@
 # ticker
 
-A receipt printer microservice for the Epson TM-T20II. Exposes a REST API and an MCP server so Claude (or anything else) can print receipts, images, and raw ESC/POS commands over the network.
+Personal software. A receipt printer microservice for the Epson TM-T20II. Exposes a REST API and an MCP server so Claude (or anything else) can print receipts, images, and raw ESC/POS commands over the network.
 
 ## Quick Start
 
